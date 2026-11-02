@@ -71,7 +71,7 @@ export function stripRunning(pages) {
 const ENDS = /[.!?:;…"”’)\]]$/;
 
 /** The stream of paragraphs, headings and pictures. A paragraph may cross a page. */
-export function toBlocks(pages) {
+export function toBlocks(pages, { noisy = false } = {}) {
   const sizes = [];
   for (const p of pages) for (const l of p.lines) for (let i = 0; i < Math.min(l.text.length, 80); i += 8) sizes.push(Math.round(l.size * 2) / 2);
   const counts = new Map();
@@ -100,7 +100,10 @@ export function toBlocks(pages) {
 
   for (const p of pages) {
     pageStart[p.n] = blocks.length + (para ? 1 : 0);
-    const left = median(p.lines.filter((l) => Math.abs(l.size - body) < 1).map((l) => l.x0));
+    // recognised text from a scan has uneven line heights: judge a line against its own page
+    const pageBody = noisy && p.lines.length >= 5 ? median(p.lines.map((l) => l.size)) : body;
+    const near = p.lines.filter((l) => Math.abs(l.size - pageBody) < Math.max(1, pageBody * 0.15));
+    const left = median((near.length ? near : p.lines).map((l) => l.x0));
     const right = Math.max(0, ...p.lines.map((l) => l.x1));
     const pics = [...(p.images ?? [])].sort((a, b) => b.y - a.y);
     let prev = null;
@@ -109,9 +112,9 @@ export function toBlocks(pages) {
         flush();
         blocks.push({ tag: "img", ...pics.shift() });
       }
-      const heading = l.size >= body * 1.18 && l.text.length < 120;
+      const heading = l.size >= pageBody * (noisy ? 1.4 : 1.18) && l.text.length < (noisy ? 70 : 120);
       if (heading) {
-        const tag = l.size >= body * 1.45 ? "h2" : "h3";
+        const tag = l.size >= pageBody * (noisy ? 1.8 : 1.45) ? "h2" : "h3";
         if (para?.tag === tag && prev && prev.y - l.y < l.size * 1.8) para.text += ` ${l.text}`;
         else {
           flush();
@@ -120,7 +123,7 @@ export function toBlocks(pages) {
         prev = l;
         continue;
       }
-      const small = l.size < body * 0.85;
+      const small = !noisy && l.size < body * 0.85;
       if (para && para.tag !== (small ? "small" : "p")) flush();
       if (!para) {
         para = { tag: small ? "small" : "p", text: l.text };
@@ -130,7 +133,8 @@ export function toBlocks(pages) {
       if (!prev) {
         // a new page: the sentence carries on unless it had ended
         const continues = !ENDS.test(para.text) || /^\p{Ll}/u.test(l.text);
-        if (continues && l.x0 - left <= body * 0.8) append(l);
+        // a word cut in two at the page's foot always carries on, indented or not
+        if (/\p{L}-$/u.test(para.text) || (continues && l.x0 - left <= body * 0.8)) append(l);
         else {
           flush();
           para = { tag: "p", text: l.text };
@@ -158,7 +162,7 @@ export function toBlocks(pages) {
 }
 
 export const blockHTML = (b) => {
-  if (b.tag === "img") return `<figure><img src="${escapeHTML(b.src ?? "")}" width="${b.width}" height="${b.height}" alt=""></figure>`;
+  if (b.tag === "img") return `<figure${b.scan ? ' class="scan"' : ""}><img src="${escapeHTML(b.src ?? "")}" width="${b.width}" height="${b.height}" alt=""></figure>`;
   if (b.tag === "small") return `<p class="small">${escapeHTML(b.text)}</p>`;
   return `<${b.tag}>${escapeHTML(b.text)}</${b.tag}>`;
 };
@@ -167,6 +171,8 @@ export const blockHTML = (b) => {
 export function toSections(blocks, pageStart, limit = 40000) {
   const sections = [];
   const blockSection = [];
+  const startsAt = new Map();
+  for (const [page, at] of Object.entries(pageStart)) startsAt.set(Math.min(at, blocks.length - 1), [...(startsAt.get(Math.min(at, blocks.length - 1)) ?? []), page]);
   let cur = "";
   blocks.forEach((b, i) => {
     const html = blockHTML(b);
@@ -175,7 +181,9 @@ export function toSections(blocks, pageStart, limit = 40000) {
       cur = "";
     }
     blockSection[i] = sections.length;
-    cur += html;
+    // an anchor where each PDF page begins, so the contents can find its exact page
+    const pages = startsAt.get(i);
+    cur += pages ? html.replace(/^<[^>]+>/, (m) => m + pages.map((n) => `<span data-a="p${n}"></span>`).join("")) : html;
   });
   if (cur) sections.push(cur);
   const pageSection = {};
@@ -198,3 +206,50 @@ export const rescale = (page, savedTotal, total) => {
   if (!savedTotal || savedTotal === total || savedTotal < 2) return Math.min(Math.max(page || 1, 1), total);
   return Math.min(Math.max(1 + Math.round(((page - 1) / (savedTotal - 1)) * (total - 1)), 1), total);
 };
+
+/** Table-of-contents titles can carry a picture's caption: "A note for Miss Bennet. CHAPTER VII." */
+export const tidyTitle = (t) => {
+  const s = t.replace(/\s+/g, " ").trim();
+  const m = /^.{3,}?[.!?\u201d"]\s+((?:chapter|part|book|canto|letter|section)\s+[\divxlcdm]+\.?(?:\s.*)?)$/i.exec(s);
+  return m ? m[1] : s;
+};
+
+const CHAPTERISH = /^(chapter|part|book|section|canto|lecture|lesson|appendix|preface|foreword|introduction|prologue|epilogue|conclusion|index|bibliography)\b/i;
+
+/**
+ * Chapters for a PDF that lists none, from its pages' own text: lines set larger
+ * than the body, or that read like "Chapter IV". pages: [{ n, lines }].
+ */
+export function guessContents(pages) {
+  const counts = new Map();
+  for (const p of pages) for (const l of p.lines) {
+    const size = Math.round(l.size * 2) / 2;
+    counts.set(size, (counts.get(size) ?? 0) + l.text.length);
+  }
+  const body = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 12;
+  const found = [];
+  for (const p of pages) {
+    // a heading sits near the top of its page; a whole page of big lines is a title page, or a table
+    const big = p.lines.filter((l) => l.size >= body * 1.18);
+    for (const l of p.lines.slice(0, 8)) {
+      const text = l.text.replace(/[.\s]+\d+$/, "").trim();
+      if (text.length < 3 || text.length > 80 || !/\p{L}{2}/u.test(text)) continue;
+      const large = l.size >= body * 1.18 && big.length <= 6;
+      const named = CHAPTERISH.test(text) && text.length <= 60;
+      if (!large && !named) continue;
+      found.push({ title: text, pdfPage: p.n, named, size: l.size });
+      break;
+    }
+  }
+  // running heads look like headings when the same words come back again and again
+  const repeats = new Map();
+  for (const f of found) {
+    const k = f.title.toLowerCase().replace(/\d+/g, "#");
+    repeats.set(k, (repeats.get(k) ?? 0) + 1);
+  }
+  let out = found.filter((f, i) => (f.named || (repeats.get(f.title.toLowerCase().replace(/\d+/g, "#")) ?? 0) < 4) && found[i - 1]?.title.toLowerCase() !== f.title.toLowerCase());
+  // too many to be chapters: keep only what says it is one
+  if (out.length > Math.max(40, pages.length / 4)) out = out.filter((f) => f.named);
+  const top = Math.max(0, ...out.map((f) => f.size));
+  return out.slice(0, 400).map((f) => ({ title: f.title, pdfPage: f.pdfPage, depth: f.size >= top - 0.5 || !top ? 0 : 1 }));
+}

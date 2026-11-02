@@ -1,46 +1,57 @@
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import { useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
-import { Alert, Dimensions, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, BackHandler, Dimensions, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { allBooks, type Book, changed, lastRead } from "../core/db";
-import { downloadProgress, importFile, progressBus, pumpDownloads, queueBook, removeDownload } from "../core/downloads";
+import { allBooks, type Book, changed, lastRead, setFavorite, setGenre } from "../core/db";
+import { deleteBooks, importFile } from "../core/downloads";
+import { SHELVES, shelfName } from "../core/genres";
+import { log } from "../core/log";
 import { takeIncoming } from "../core/selected";
 import { useBus } from "../core/store";
-import { fileSize, percent } from "../core/words";
-import { Cover } from "../ui/cover";
+import { percent } from "../core/words";
+import { Cover, coverOf } from "../ui/cover";
 import { BottomNav } from "../ui/nav";
 import { deva, SHLOKA, sans, sansMedium, serif, serifMedium, type Palette, useTheme } from "../ui/theme";
-import { log } from "../core/log";
 
-const FILTERS = [
-  ["all", "All"], ["phone", "On this phone"], ["book", "Books"], ["markdown", "Notes"], ["image", "Pictures"],
-] as const;
-type Filter = (typeof FILTERS)[number][0];
 const COLUMNS = 3;
+const SHELF_COVER = 104;
+const UNDO_MS = 6000;
 
 export default function Library() {
   useBus(changed);
-  useBus(progressBus);
   const t = useTheme();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const [filter, setFilter] = useState<Filter>("all");
+  const [tab, setTab] = useState<string>("all");
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
-  const books = allBooks();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [choosingGenre, setChoosingGenre] = useState(false);
+  const [leaving, setLeaving] = useState<string[]>([]); // deleted, until Undo runs out
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pending = useRef<string[]>([]);
+  const selecting = selected.size > 0;
 
-  const shown = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    return books.filter((b) => {
-      if (s && !b.title.toLowerCase().includes(s) && !b.author.toLowerCase().includes(s) && !b.folder.toLowerCase().includes(s)) return false;
-      if (filter === "phone") return b.state === "ready";
-      if (filter === "all") return true;
-      if (filter === "book") return b.kind === "pdf" || b.kind === "epub";
-      return b.kind === filter;
-    });
-  }, [books, filter, q]);
+  // books on their way live in Downloads; here is what you can read
+  const all = allBooks();
+  const books = all.filter((b) => b.state === "ready" && !leaving.includes(b.id));
+  const onTheWay = all.length - books.length - leaving.length;
+
+  const shelves = useMemo(() => {
+    const by = new Map<string, Book[]>();
+    for (const b of books) {
+      const k = SHELVES.some(([s]) => s === b.genre) ? b.genre : "other";
+      by.set(k, [...(by.get(k) ?? []), b]);
+    }
+    return SHELVES.flatMap(([k]) => (by.has(k) ? [{ key: k as string, books: by.get(k) as Book[] }] : []));
+  }, [books]);
+  const favorites = books.filter((b) => b.favorite);
+
+  const s = q.trim().toLowerCase();
+  const list = s ? books.filter((b) => b.title.toLowerCase().includes(s) || b.author.toLowerCase().includes(s)) : (shelves.find((x) => x.key === tab)?.books ?? []);
+  const showGrid = !!s || tab !== "all";
 
   const read = (id: string) => router.push({ pathname: "/read/[id]", params: { id } });
 
@@ -51,14 +62,60 @@ export default function Library() {
     const name = decodeURIComponent(uri.split("/").pop() ?? "book.pdf");
     void importFile(uri, /\.[a-z]+$/i.test(name) ? name : `${name}.pdf`, 0)
       .then((id) => id && read(id))
-      .catch(() => Alert.alert("That file can't be read"));
+      .catch((e: unknown) => {
+        log.error("library", "open from another app failed", e instanceof Error ? e : { e: String(e) });
+        Alert.alert("That file can't be read");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // back leaves selecting before it leaves the app
+  useEffect(() => {
+    if (!selecting) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      setSelected(new Set());
+      return true;
+    });
+    return () => sub.remove();
+  }, [selecting]);
+
+  const finish = (ids: string[]) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    pending.current = [];
+    if (ids.length) void deleteBooks(ids);
+    setLeaving([]);
+  };
+  // leaving this screen during the Undo time still deletes
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+      if (pending.current.length) void deleteBooks(pending.current);
+    },
+    [],
+  );
+
+  const toggle = (id: string) =>
+    setSelected((now) => {
+      const next = new Set(now);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const removeSelected = () => {
+    const ids = [...selected, ...leaving];
+    setSelected(new Set());
+    setLeaving(ids);
+    pending.current = ids;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => finish(ids), UNDO_MS);
+  };
+
   const open = (b: Book) => {
-    log.info("library", "open", { id: b.id, state: b.state });
-    if (b.state === "ready" && b.file) return read(b.id);
-    queueBook(b.id);
-    pumpDownloads();
+    if (selecting) return toggle(b.id);
+    log.info("library", "open", { id: b.id });
+    read(b.id);
   };
 
   const addFile = async () => {
@@ -75,19 +132,16 @@ export default function Library() {
     }
   };
 
-  const manage = (b: Book) => {
-    if (b.state !== "ready") return open(b);
-    Alert.alert(b.title, `${fileSize(b.size)} on this phone.${b.source === "phone" ? " It leaves your library." : " It stays in your library to download again."}`, [
-      { text: "Keep" },
-      { text: "Remove from phone", style: "destructive", onPress: () => void removeDownload(b) },
-    ]);
-  };
+  const gridW = Math.floor((Dimensions.get("window").width - 20 * 2 - 16 * (COLUMNS - 1)) / COLUMNS);
+  const recent = lastRead().find((b) => b.state === "ready" && !leaving.includes(b.id));
+  const chosen = books.filter((b) => selected.has(b.id));
+  const allLoved = chosen.length > 0 && chosen.every((b) => b.favorite);
 
-  const width = Dimensions.get("window").width;
-  const coverW = Math.floor((width - 20 * 2 - 16 * (COLUMNS - 1)) / COLUMNS);
-  const recent = lastRead().find((b) => b.state === "ready");
+  const tile = (b: Book, width: number) => (
+    <Tile key={b.id} b={b} width={width} t={t} selecting={selecting} on={selected.has(b.id)} onPress={() => open(b)} onLongPress={() => toggle(b.id)} />
+  );
 
-  if (books.length === 0) {
+  if (books.length === 0 && !leaving.length) {
     return (
       <View style={{ flex: 1, backgroundColor: t.bg }}>
         <View style={[styles.center, { paddingTop: insets.top }]}>
@@ -95,7 +149,9 @@ export default function Library() {
           <Text style={[styles.meaning, { color: t.soft }]}>{SHLOKA.meaning}</Text>
           <Text style={[styles.source, { color: t.faint }]}>{SHLOKA.source}</Text>
           <Text style={[styles.hello, { color: t.ink }]}>A library that fits in your hand</Text>
-          <Text style={[styles.helloSub, { color: t.soft }]}>Find free books from the world's public libraries, or open a PDF or EPUB from this phone. Everything you keep reads offline.</Text>
+          <Text style={[styles.helloSub, { color: t.soft }]}>
+            {onTheWay ? "Your books are on their way. See them in Downloads." : "Find free books from the world's public libraries, or open a PDF or EPUB from this phone. Everything you keep reads offline."}
+          </Text>
           <Pressable style={[styles.primary, { backgroundColor: t.accent }]} onPress={() => router.replace("/discover")}>
             <Text style={{ color: t.accentInk, fontFamily: sansMedium, fontSize: 16 }}>Find a book</Text>
           </Pressable>
@@ -110,61 +166,134 @@ export default function Library() {
 
   return (
     <View style={{ flex: 1, backgroundColor: t.bg }}>
-      <FlatList
-        style={{ flex: 1 }}
-        data={shown}
-        keyExtractor={(b) => b.id}
-        numColumns={COLUMNS}
-        columnWrapperStyle={{ gap: 16, paddingHorizontal: 20 }}
-        contentContainerStyle={{ paddingTop: insets.top + 10, paddingBottom: 24 }}
-        keyboardShouldPersistTaps="handled"
-        ListHeaderComponent={
+      <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingTop: insets.top + 10, paddingBottom: 28 }} keyboardShouldPersistTaps="handled">
+        <View style={styles.titleRow}>
           <View>
-            <View style={styles.titleRow}>
-              <View>
-                <Text style={[styles.title, { color: t.ink }]}>Library</Text>
-                <Text accessibilityLabel={SHLOKA.meaning} style={[styles.tag, { color: t.accent }]}>{SHLOKA.short}</Text>
-              </View>
-              <View style={{ flexDirection: "row", gap: 2 }}>
-                <Icon t={t} name="search" label="Find a book" onPress={() => setSearching((v) => !v)} />
-                <Icon t={t} name="add" label="Open a file" onPress={() => void addFile()} />
-                <Icon t={t} name="options-outline" label="Settings" onPress={() => router.push("/settings")} />
-              </View>
-            </View>
-            {searching ? (
-              <View style={[styles.search, { backgroundColor: t.card }]}>
-                <Ionicons name="search" size={17} color={t.soft} />
-                <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Title or author" placeholderTextColor={t.faint} style={{ flex: 1, height: 46, color: t.ink, fontFamily: sans, fontSize: 15 }} />
-              </View>
-            ) : null}
-            {recent && !q && filter === "all" ? <Continue b={recent} t={t} onPress={() => read(recent.id)} /> : null}
-            <FlatList
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              data={FILTERS}
-              keyExtractor={([k]) => k}
-              contentContainerStyle={{ paddingHorizontal: 20, gap: 6 }}
-              style={{ marginTop: 8, marginBottom: 6 }}
-              renderItem={({ item: [k, label] }) => (
-                <Pressable onPress={() => setFilter(k)} style={{ height: 44, justifyContent: "center" }} accessibilityState={{ selected: filter === k }}>
-                  <View style={[styles.chip, { backgroundColor: filter === k ? t.chipOn : t.chip }]}>
-                    <Text style={{ color: filter === k ? t.chipOnInk : t.soft, fontFamily: sansMedium, fontSize: 13 }}>{label}</Text>
-                  </View>
-                </Pressable>
-              )}
-            />
+            <Text style={[styles.title, { color: t.ink }]}>Library</Text>
+            <Text accessibilityLabel={SHLOKA.meaning} style={[styles.tag, { color: t.accent }]}>{SHLOKA.short}</Text>
           </View>
-        }
-        ListEmptyComponent={
-          <Text style={[styles.none, { color: t.soft }]}>{filter === "phone" ? "Nothing on this phone yet.\nTap a book and it stays here." : q ? "No book by that name." : "None of these yet."}</Text>
-        }
-        renderItem={({ item: b }) => (
-          <Pressable style={{ width: coverW, marginBottom: 18 }} onPress={() => open(b)} onLongPress={() => manage(b)} accessibilityLabel={b.title}>
-            <Cover id={b.id} title={b.title} author={b.author} uri={b.cover} width={coverW} faded={b.state !== "ready" && b.state !== "downloading"} />
-            <Status b={b} t={t} />
-          </Pressable>
+          <View style={{ flexDirection: "row", gap: 2 }}>
+            <Icon t={t} name="search" label="Find a book" onPress={() => setSearching((v) => !v)} />
+            <Icon t={t} name="add" label="Open a file" onPress={() => void addFile()} />
+            <Icon t={t} name="options-outline" label="Settings" onPress={() => router.push("/settings")} />
+          </View>
+        </View>
+        {searching ? (
+          <View style={[styles.search, { backgroundColor: t.card }]}>
+            <Ionicons name="search" size={17} color={t.soft} />
+            <TextInput autoFocus value={q} onChangeText={setQ} placeholder="Title or author" placeholderTextColor={t.faint} style={{ flex: 1, height: 46, color: t.ink, fontFamily: sans, fontSize: 15 }} />
+          </View>
+        ) : null}
+
+        {!s && recent ? <Continue b={recent} t={t} onPress={() => open(recent)} onLongPress={() => toggle(recent.id)} /> : null}
+
+        {!s && favorites.length ? (
+          <View style={{ marginTop: 24 }}>
+            <View style={styles.shelfHead}>
+              <Ionicons name="heart" size={15} color={t.accent} style={{ marginRight: 7 }} />
+              <Text style={[styles.shelfName, { color: t.ink }]}>Favorites</Text>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row}>
+              {favorites.map((b) => tile(b, SHELF_COVER))}
+            </ScrollView>
+          </View>
+        ) : null}
+
+        {!s && shelves.length > 1 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 16 }} contentContainerStyle={{ paddingHorizontal: 20, gap: 20 }}>
+            {[{ key: "all" }, ...shelves].map(({ key }) => {
+              const on = tab === key;
+              return (
+                <Pressable key={key} accessibilityState={{ selected: on }} onPress={() => setTab(key)} style={styles.genre}>
+                  <Text style={{ color: on ? t.ink : t.soft, fontFamily: on ? sansMedium : sans, fontSize: 15 }}>{key === "all" ? "All" : shelfName(key)}</Text>
+                  <View style={[styles.genreDot, { backgroundColor: on ? t.accent : "transparent" }]} />
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        ) : null}
+
+        {showGrid ? (
+          <View style={styles.grid}>
+            {list.length ? list.map((b) => tile(b, gridW)) : <Text style={[styles.none, { color: t.soft }]}>{s ? "No book by that name." : "None here yet."}</Text>}
+          </View>
+        ) : (
+          shelves.map((shelf) => (
+            <View key={shelf.key} style={{ marginTop: 20 }}>
+              <Pressable onPress={() => setTab(shelf.key)} style={styles.shelfHead} accessibilityLabel={`${shelfName(shelf.key)}, ${shelf.books.length} books`}>
+                <Text style={[styles.shelfName, { color: t.ink }]}>{shelfName(shelf.key)}</Text>
+                <Text style={{ color: t.faint, fontFamily: sans, fontSize: 13, marginLeft: 8 }}>{shelf.books.length}</Text>
+              </Pressable>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row}>
+                {shelf.books.map((b) => tile(b, SHELF_COVER))}
+              </ScrollView>
+            </View>
+          ))
         )}
-      />
+      </ScrollView>
+
+      {/* scrolled content doesn't run under the clock */}
+      <View pointerEvents="none" style={{ position: "absolute", top: 0, left: 0, right: 0, height: insets.top, backgroundColor: t.bg }} />
+      {selecting ? (
+        <View style={[styles.selectBar, { backgroundColor: t.nav, paddingTop: insets.top + 6 }]}>
+          <Pressable accessibilityLabel="Stop selecting" style={styles.icon} onPress={() => setSelected(new Set())}>
+            <Ionicons name="close" size={24} color={t.ink} />
+          </Pressable>
+          <Text style={{ flex: 1, color: t.ink, fontFamily: sansMedium, fontSize: 17 }}>{selected.size}</Text>
+          <Pressable style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 8 }} onPress={() => setSelected(selected.size === books.length ? new Set() : new Set(books.map((b) => b.id)))}>
+            <Text style={{ color: t.accent, fontFamily: sansMedium, fontSize: 14 }}>{selected.size === books.length ? "None" : "All"}</Text>
+          </Pressable>
+          <Pressable accessibilityLabel={allLoved ? "Remove from favorites" : "Add to favorites"} style={styles.icon} onPress={() => { setFavorite([...selected], !allLoved); setSelected(new Set()); }}>
+            <Ionicons name={allLoved ? "heart" : "heart-outline"} size={22} color={t.accent} />
+          </Pressable>
+          <Pressable accessibilityLabel="Change genre" style={styles.icon} onPress={() => setChoosingGenre(true)}>
+            <Ionicons name="pricetag-outline" size={21} color={t.ink} />
+          </Pressable>
+          <Pressable accessibilityLabel={`Delete ${selected.size} selected`} style={styles.icon} onPress={removeSelected}>
+            <Ionicons name="trash-outline" size={22} color={t.danger} />
+          </Pressable>
+        </View>
+      ) : null}
+
+      {choosingGenre ? (
+        <View style={[styles.sheet, { backgroundColor: t.nav, paddingBottom: 12, bottom: 60 + insets.bottom }]}>
+          <Text style={{ color: t.soft, fontFamily: sansMedium, fontSize: 13, marginBottom: 6 }}>Move to</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
+            {SHELVES.map(([k, label]) => (
+              <Pressable
+                key={k}
+                style={{ width: "50%", minHeight: 44, justifyContent: "center" }}
+                onPress={() => {
+                  setGenre([...selected], k);
+                  setChoosingGenre(false);
+                  setSelected(new Set());
+                }}
+              >
+                <Text style={{ color: t.ink, fontFamily: serif, fontSize: 18 }}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      {leaving.length ? (
+        <View style={[styles.undo, { backgroundColor: t.chipOn }]}>
+          <Text style={{ flex: 1, color: t.chipOnInk, fontFamily: sans, fontSize: 14 }}>{leaving.length === 1 ? "Book deleted" : `${leaving.length} books deleted`}</Text>
+          <Pressable
+            hitSlop={10}
+            style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 8 }}
+            onPress={() => {
+              if (timer.current) clearTimeout(timer.current);
+              timer.current = null;
+              pending.current = [];
+              log.info("library", "undo delete", { ids: leaving });
+              setLeaving([]);
+            }}
+          >
+            <Text style={{ color: t.chipOnInk, fontFamily: sansMedium, fontSize: 14, textDecorationLine: "underline" }}>Undo</Text>
+          </Pressable>
+        </View>
+      ) : null}
       <BottomNav t={t} at="/" />
     </View>
   );
@@ -176,58 +305,51 @@ const Icon = ({ t, name, label, onPress }: { t: Palette; name: keyof typeof Ioni
   </Pressable>
 );
 
-function Bar({ value, t, color }: { value: number; t: Palette; color?: string }) {
+function Tile({ b, width, t, selecting, on, onPress, onLongPress }: { b: Book; width: number; t: Palette; selecting: boolean; on: boolean; onPress: () => void; onLongPress: () => void }) {
+  const reading = b.page > 1 && b.total > 1;
   return (
-    <View style={[styles.bar, { backgroundColor: t.line }]}>
-      <View style={{ width: `${Math.round(Math.min(1, value) * 100)}%`, height: "100%", backgroundColor: color ?? t.accent }} />
-    </View>
-  );
-}
-
-/** Where a book is: being read, on the phone, on its way, or elsewhere. */
-function Status({ b, t }: { b: Book; t: Palette }) {
-  const row = (icon: keyof typeof Ionicons.glyphMap, text: string) => (
-    <View style={styles.status}>
-      <Ionicons name={icon} size={13} color={t.soft} />
-      <Text numberOfLines={1} style={[styles.statusText, { color: t.soft }]}>{text}</Text>
-    </View>
-  );
-  if (b.state === "downloading") {
-    const p = downloadProgress(b.id);
-    return (
-      <View style={styles.status}>
-        <Bar value={p} t={t} color={t.soft} />
-        <Text style={[styles.statusText, { color: t.soft }]}>{Math.round(p * 100)}%</Text>
+    <Pressable style={{ width }} onPress={onPress} onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={b.title} accessibilityState={{ selected: on }}>
+      <View>
+        <Cover id={b.id} title={b.title} author={b.author} uri={coverOf(b)} width={width} dim={selecting && !on ? "rgba(15,17,21,.5)" : undefined} />
+        {selecting ? (
+          <View style={[styles.tick, { backgroundColor: on ? t.accent : "rgba(0,0,0,.45)", borderColor: on ? t.accent : "#fff" }]}>
+            {on ? <Ionicons name="checkmark" size={16} color={t.accentInk} /> : null}
+          </View>
+        ) : b.favorite ? (
+          <View style={styles.loved}>
+            <Ionicons name="heart" size={13} color="#fff" />
+          </View>
+        ) : null}
       </View>
-    );
-  }
-  if (b.state === "ready") {
-    if (b.page > 1 && b.total > 1) {
-      return (
-        <View style={styles.status}>
-          <Bar value={(b.page - 1) / (b.total - 1)} t={t} />
-          <Text style={[styles.statusText, { color: t.soft }]}>{percent(b.page, b.total)}%</Text>
-        </View>
-      );
-    }
-    return row("checkmark", "On phone");
-  }
-  if (b.state === "failed") return row("alert-circle-outline", "Tap to retry");
-  if (b.state === "queued") return row("time-outline", "Waits for a connection");
-  return row("cloud-outline", fileSize(b.size));
+      <View style={styles.status}>
+        {reading ? (
+          <>
+            <View style={[styles.bar, { backgroundColor: t.line }]}>
+              <View style={{ width: `${Math.round(((b.page - 1) / (b.total - 1)) * 100)}%`, height: "100%", backgroundColor: t.accent }} />
+            </View>
+            <Text style={{ color: t.soft, fontFamily: sans, fontSize: 11 }}>{percent(b.page, b.total)}%</Text>
+          </>
+        ) : null}
+      </View>
+    </Pressable>
+  );
 }
 
-function Continue({ b, t, onPress }: { b: Book; t: Palette; onPress: () => void }) {
+function Continue({ b, t, onPress, onLongPress }: { b: Book; t: Palette; onPress: () => void; onLongPress: () => void }) {
   return (
-    <Pressable onPress={onPress} accessibilityLabel={`Continue reading ${b.title}`} style={[styles.continue, { backgroundColor: t.card }]}>
-      <Cover id={b.id} title={b.title} author={b.author} uri={b.cover} width={92} />
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={350} accessibilityLabel={`Continue reading ${b.title}`} style={[styles.continue, { backgroundColor: t.card }]}>
+      <Cover id={b.id} title={b.title} author={b.author} uri={coverOf(b)} width={92} />
       <View style={{ flex: 1, marginLeft: 16 }}>
         <Text style={{ color: t.accent, fontFamily: sansMedium, fontSize: 12 }}>Continue reading</Text>
         <Text numberOfLines={2} style={{ color: t.ink, fontFamily: serif, fontSize: 23, lineHeight: 26, marginTop: 6 }}>{b.title}</Text>
         {b.author ? <Text numberOfLines={1} style={{ color: t.soft, fontFamily: sans, fontSize: 13, marginTop: 5 }}>{b.author}</Text> : null}
         {b.total > 1 ? (
           <>
-            <View style={{ marginTop: 14 }}><Bar value={(Math.max(b.page, 1) - 1) / (b.total - 1)} t={t} /></View>
+            <View style={{ marginTop: 14, flexDirection: "row" }}>
+              <View style={[styles.bar, { backgroundColor: t.line }]}>
+                <View style={{ width: `${Math.round(((Math.max(b.page, 1) - 1) / (b.total - 1)) * 100)}%`, height: "100%", backgroundColor: t.accent }} />
+              </View>
+            </View>
             <Text style={{ color: t.soft, fontFamily: sans, fontSize: 12, marginTop: 7 }}>Page {Math.max(b.page, 1)} of {b.total}</Text>
           </>
         ) : null}
@@ -251,9 +373,18 @@ const styles = StyleSheet.create({
   icon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
   continue: { flexDirection: "row", alignItems: "center", marginHorizontal: 20, marginTop: 14, padding: 14, borderRadius: 20 },
   search: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 20, marginTop: 8, paddingHorizontal: 14, borderRadius: 14 },
-  chip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 17 },
-  none: { textAlign: "center", lineHeight: 22, marginTop: 44, paddingHorizontal: 30, fontFamily: sans },
+  genre: { height: 48, alignItems: "center", justifyContent: "center", gap: 4, paddingTop: 6 },
+  genreDot: { width: 4, height: 4, borderRadius: 2 },
+  shelfHead: { flexDirection: "row", alignItems: "center", minHeight: 36, paddingHorizontal: 20 },
+  shelfName: { fontFamily: serifMedium, fontSize: 21 },
+  row: { paddingHorizontal: 20, paddingTop: 6, gap: 14 },
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 16, paddingHorizontal: 20, marginTop: 10 },
+  none: { textAlign: "center", lineHeight: 22, marginTop: 44, width: "100%", fontFamily: sans },
   bar: { flex: 1, height: 3, borderRadius: 2, overflow: "hidden" },
-  status: { height: 26, flexDirection: "row", alignItems: "center", gap: 5 },
-  statusText: { fontFamily: sans, fontSize: 11 },
+  status: { height: 22, flexDirection: "row", alignItems: "center", gap: 5 },
+  tick: { position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: 13, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
+  loved: { position: "absolute", top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: "rgba(0,0,0,.45)", alignItems: "center", justifyContent: "center" },
+  selectBar: { position: "absolute", top: 0, left: 0, right: 0, flexDirection: "row", alignItems: "center", paddingHorizontal: 6, paddingBottom: 8 },
+  sheet: { position: "absolute", left: 0, right: 0, paddingHorizontal: 22, paddingTop: 16, borderTopLeftRadius: 20, borderTopRightRadius: 20 },
+  undo: { flexDirection: "row", alignItems: "center", marginHorizontal: 16, marginBottom: 10, paddingLeft: 16, paddingRight: 8, borderRadius: 14, minHeight: 50 },
 });

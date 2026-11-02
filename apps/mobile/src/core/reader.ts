@@ -1,8 +1,9 @@
 import { Asset } from "expo-asset";
 import * as FS from "expo-file-system/legacy";
+import { log } from "./log";
+import { PDF_FILES } from "./reader-files";
+import { READER_VERSION as VERSION } from "./reader-version";
 
-// Bump when the reader changes, so phones get the new files.
-const VERSION = "2";
 
 const FILES: [number, string][] = [
   [require("../../assets/reader/index.html.txt"), "index.html"],
@@ -23,21 +24,39 @@ const FILES: [number, string][] = [
 
 export const readerDir = () => `${FS.documentDirectory}reader/`;
 
-/** Puts the reader's files on the phone once: it needs nothing else to run. */
-export const prepareReader = async (): Promise<string> => {
-  const dir = readerDir();
-  const stamp = `${dir}.version`;
-  const have = await FS.readAsStringAsync(stamp).catch(() => "");
-  if (have !== VERSION || __DEV__) {
-    await FS.deleteAsync(dir, { idempotent: true });
-    await FS.makeDirectoryAsync(dir, { intermediates: true });
-    for (const [mod, name] of FILES) {
-      const a = Asset.fromModule(mod);
-      await a.downloadAsync();
-      if (!a.localUri) throw new Error(`reader: ${name}`);
-      await FS.copyAsync({ from: a.localUri, to: dir + name });
-    }
-    await FS.writeAsStringAsync(stamp, VERSION);
-  }
-  return `${dir}index.html`;
+let preparing: Promise<string> | null = null;
+
+const copyIn = async (mod: number, to: string) => {
+  const a = Asset.fromModule(mod);
+  await a.downloadAsync();
+  if (!a.localUri) throw new Error(`reader: ${to}`);
+  await FS.copyAsync({ from: a.localUri, to });
 };
+
+/** Puts the reader's files on the phone once: it needs nothing else to run. */
+export const prepareReader = (): Promise<string> =>
+  (preparing ??= (async () => {
+    const dir = readerDir();
+    const stamp = `${dir}.version`;
+    const have = await FS.readAsStringAsync(stamp).catch(() => "");
+    if (have !== VERSION) {
+      const t0 = Date.now();
+      await FS.deleteAsync(dir, { idempotent: true });
+      for (const sub of ["", "pdf/wasm/", "pdf/cmaps/", "pdf/standard_fonts/", "pdf/iccs/"]) await FS.makeDirectoryAsync(dir + sub, { intermediates: true });
+      for (const [mod, name] of FILES) await copyIn(mod, dir + name);
+      // a few at a time: there are some two hundred small ones
+      const rest = [...PDF_FILES];
+      await Promise.all(
+        Array.from({ length: 8 }, async () => {
+          for (let f = rest.pop(); f; f = rest.pop()) await copyIn(f[0], `${dir}pdf/${f[1]}`);
+        }),
+      );
+      await FS.writeAsStringAsync(stamp, VERSION);
+      log.info("reader", "files ready", { version: VERSION, ms: Date.now() - t0 });
+    }
+    return `${dir}index.html`;
+  })().catch((e) => {
+    preparing = null;
+    log.error("reader", "couldn't prepare files", e instanceof Error ? e : { e: String(e) });
+    throw e;
+  }));

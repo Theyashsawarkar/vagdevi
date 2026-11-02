@@ -11,7 +11,9 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { changed } from "../core/db";
 import { useBus } from "../core/store";
 import { watchNetwork } from "../core/downloads";
+import { classifyLibrary } from "../core/classify";
 import { startLogging } from "../core/log";
+import { prepareReader } from "../core/reader";
 import { useTheme } from "../ui/theme";
 
 startLogging();
@@ -23,6 +25,9 @@ export default function Root() {
   const [ready] = useFonts({ Newsreader_400Regular, Newsreader_500Medium, Geist_400Regular, Geist_500Medium, Geist_600SemiBold, NotoSerifDevanagari_400Regular });
   useEffect(() => {
     watchNetwork();
+    // ready before the first book is opened
+    void prepareReader().catch(() => undefined);
+    void classifyLibrary();
   }, []);
   useEffect(() => {
     if (ready) void SplashScreen.hideAsync().catch(() => undefined);
@@ -35,6 +40,7 @@ export default function Root() {
         <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: t.bg }, animation: "fade" }}>
           <Stack.Screen name="index" options={{ animation: "none" }} />
           <Stack.Screen name="discover" options={{ animation: "none" }} />
+          <Stack.Screen name="downloads" options={{ animation: "none" }} />
           <Stack.Screen name="book" options={{ animation: "slide_from_right" }} />
           <Stack.Screen name="settings" options={{ animation: "slide_from_right" }} />
         </Stack>

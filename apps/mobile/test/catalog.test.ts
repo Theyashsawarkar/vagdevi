@@ -1,18 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { nameOrder, parseArchive, parseArchiveFiles, parseGutendex, parseStandardEbooks } from "../src/core/catalog";
+import { mergeShelves, nameOrder, parseArchive, parseArchiveFiles, parseGutenberg, parseGutenbergEditions, parseStandardEbooks, type Shelf } from "../src/core/catalog";
 
 describe("Project Gutenberg", () => {
-  const body = (over: object) => JSON.stringify({ results: [{ id: 1342, title: "Pride and Prejudice", authors: [{ name: "Austen, Jane" }], summaries: ["A novel."], copyright: false, formats: { "application/epub+zip": "http://www.gutenberg.org/ebooks/1342.epub3.images", "image/jpeg": "https://www.gutenberg.org/cache/epub/1342/cover.jpg" }, ...over }] });
-  it("reads a book, always over HTTPS", () => {
-    const [b] = parseGutendex(body({}));
-    expect(b).toMatchObject({ key: "pg1342", author: "Jane Austen", kind: "epub", url: "https://www.gutenberg.org/ebooks/1342.epub3.images" });
+  const feed = `<feed><entry><id>https://www.gutenberg.org/ebooks/authors/search.opds/?query=x</id><title>Authors</title></entry>
+  <entry><id>https://www.gutenberg.org/ebooks/1232.opds</id><title>The Prince &amp; Others</title><content type="text">Niccol\u00f2 Machiavelli</content></entry></feed>`;
+  it("reads books and skips the feed's other links", () => {
+    expect(parseGutenberg(feed)).toEqual([expect.objectContaining({ key: "pg1232", title: "The Prince & Others", author: "Niccol\u00f2 Machiavelli", kind: "epub", url: "https://www.gutenberg.org/ebooks/1232.epub3.images", cover: "https://www.gutenberg.org/cache/epub/1232/pg1232.cover.medium.jpg" })]);
   });
-  it("leaves out anything marked as under copyright", () => {
-    expect(parseGutendex(body({ copyright: true }))).toEqual([]);
-    expect(parseGutendex(body({ copyright: null }))).toEqual([]);
+  it("finds both editions and their sizes", () => {
+    const e = parseGutenbergEditions(`<link type="application/epub+zip" rel="a" title="no images" length="609138" href="https://www.gutenberg.org/ebooks/1342.epub.noimages"/><link type="application/x-mobipocket-ebook" length="1" href="https://x/k"/><link type="application/epub+zip" rel="a" length="24864457" href="https://www.gutenberg.org/ebooks/1342.epub3.images"/>`);
+    expect(e.plain).toEqual({ url: "https://www.gutenberg.org/ebooks/1342.epub.noimages", size: 609138 });
+    expect(e.pictures?.size).toBe(24864457);
   });
-  it("leaves out books with no EPUB", () => {
-    expect(parseGutendex(body({ formats: {} }))).toEqual([]);
+});
+
+describe("one list from every library", () => {
+  const shelf = (source: Shelf["source"], titles: string[]): Shelf => ({ title: "", note: "", source, state: "ready", books: titles.map((title) => ({ key: title, source, title, author: "", cover: null, about: "", kind: "epub", url: null, size: 0, rights: "" })) });
+  it("takes turns, and never lists a book twice", () => {
+    const m = mergeShelves([shelf("Standard Ebooks", ["Meditations", "The Republic"]), shelf("Project Gutenberg", ["Walden", "Meditations", "Leviathan"])]);
+    expect(m.map((b) => b.title)).toEqual(["Meditations", "Walden", "The Republic", "Leviathan"]);
   });
 });
 

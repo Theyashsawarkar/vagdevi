@@ -1,0 +1,8 @@
+# The project website (docs/, GitHub Pages): built by scripts/build-site.py
+name = "vagdevi"
+sanskrit = "वाग्देवी"
+meaning = "goddess of the word"
+tagline = "A book reader for your phone: every free book in reach, pages that turn like paper, and everything works offline."
+color = "peach"
+kind = "book reader for Android"
+logo = "assets/logo.svg"

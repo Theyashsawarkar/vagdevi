@@ -4,10 +4,10 @@ import { useKeepAwake } from "expo-keep-awake";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { setStatusBarHidden } from "expo-status-bar";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { WebView as RNWebView } from "react-native-webview";
-import { bookmarks, changed, getBook, getMark, getSetting, markOpened, rememberLookup, type ResumeMark, saveProgress, setCover, setMark, setSetting, toggleBookmark } from "../../core/db";
+import { bookmarks, changed, getBook, getMark, getSetting, markOpened, rememberLookup, type ResumeMark, saveProgress, setCover, setFavorite, setMark, setSetting, toggleBookmark } from "../../core/db";
 import { log } from "../../core/log";
 import { define, type Definition } from "../../core/dict";
 import { prepareReader, readerDir } from "../../core/reader";
@@ -31,7 +31,7 @@ const FONTS = [["Newsreader", "Newsreader"], ["Literata", "Literata"], ["serif",
 const TURNS = [["flip", "Book flip"], ["fold", "Quick fold"], ["none", "None"]] as const;
 type Turn = (typeof TURNS)[number][0];
 
-type Message = { type: string; target?: ResumeMark | null; marked?: boolean; resumed?: boolean; level?: "debug" | "info" | "warn" | "error"; msg?: string; page?: number; total?: number; word?: string; context?: string; message?: string; dir?: number; toc?: { title: string; page: number }[]; data?: string; layout?: string; canFlow?: boolean; flow?: boolean };
+type Message = { type: string; target?: ResumeMark | null; marked?: boolean; resumed?: boolean; level?: "debug" | "info" | "warn" | "error"; msg?: string; page?: number; total?: number; word?: string; context?: string; message?: string; dir?: number; toc?: { title: string; page: number; depth?: number }[]; busy?: boolean; data?: string; layout?: string; canFlow?: boolean; flow?: boolean };
 
 const speedWord = (ms: number) => (ms < 400 ? "brisk" : ms < 800 ? "like a real page" : "unhurried");
 
@@ -41,6 +41,8 @@ export default function Read() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { width: screenW, height: screenH } = useWindowDimensions();
+  const wide = screenW > screenH;
   const book = useMemo(() => getBook(id), [id]);
   const web = useRef<{ injectJavaScript: (js: string) => void } | null>(null);
   const [uri, setUri] = useState<string | null>(null);
@@ -55,15 +57,18 @@ export default function Read() {
   const [speed, setSpeed] = useState(() => Number(getSetting("flipMs", "600")));
   const [size, setSize] = useState(() => Number(getSetting("fontSize", "18")));
   const [font, setFont] = useState(() => getSetting("readerFont", "Newsreader"));
-  const [layout, setLayoutState] = useState(() => getSetting(`layout:${id}`, "text"));
+  // a PDF opens as printed; Reading mode is one tap away in the controls
+  const [layout, setLayoutState] = useState(() => getSetting(`layout:${id}`, "page"));
   const [canFlow, setCanFlow] = useState(true);
   const [flow, setFlow] = useState(false);
-  const [toc, setToc] = useState<{ title: string; page: number }[]>([]);
+  const [toc, setToc] = useState<{ title: string; page: number; depth?: number }[]>([]);
+  const [tocBusy, setTocBusy] = useState(false);
+  const contents = useRef<{ scrollTo: (o: { y: number; animated: boolean }) => void } | null>(null);
   const [note, setNote] = useState("");
   const [coach, setCoach] = useState(() => getSetting("coached", "") === "");
   const c = COLORS[theme];
   const call = (js: string) => web.current?.injectJavaScript(`${js};true;`);
-  const cacheKey = `${id}:${book?.file_mtime ?? 0}:1`;
+  const cacheKey = `${id}:${book?.file_mtime ?? 0}:3`;
 
   useEffect(() => {
     if (id) markOpened(id);
@@ -88,9 +93,9 @@ export default function Read() {
       case "ready": {
         if (!book?.file) return;
         const text = book.kind === "markdown" ? await FS.readAsStringAsync(book.file) : undefined;
-        const settings = { turn, speed, size, font };
+        const settings = { turn, speed, size, font, safeBottom: insets.bottom, safeTop: insets.top };
         const saved = getMark(book.id);
-        call(`reader.open(${JSON.stringify({ id, url: book.file, kind: book.kind, page: Math.max(book.page, 1), savedTotal: book.total, theme, settings, text, layout, cacheKey, wantCover: !book.cover, mark: saved })})`);
+        call(`reader.open(${JSON.stringify({ id, url: book.file, kind: book.kind, page: Math.max(book.page, 1), savedTotal: book.total, theme, settings, text, layout, cacheKey, wantCover: !book.cover && !book.cover_url, mark: saved })})`);
         break;
       }
       case "log":
@@ -113,7 +118,6 @@ export default function Read() {
         break;
       case "layout":
         setLayoutState(m.layout ?? "page");
-        setCanFlow(m.canFlow ?? true);
         setFlow(m.layout === "text");
         break;
       case "scanned":
@@ -122,6 +126,10 @@ export default function Read() {
         break;
       case "toc":
         setToc(m.toc ?? []);
+        log.debug("read", "contents", { entries: m.toc?.length ?? 0 });
+        break;
+      case "tocBusy":
+        setTocBusy(!!m.busy);
         break;
       case "cover":
         if (id && m.data) {
@@ -212,6 +220,7 @@ export default function Read() {
   }
 
   const marked = bookmarks(book.id);
+  const live = getBook(book.id);
   const isMarked = marked.includes(page);
   const bar = { backgroundColor: c.bar, borderColor: c.edge, borderWidth: c.flat ? StyleSheet.hairlineWidth : 0 };
   const closeBtn = (onPress: () => void) => (
@@ -257,23 +266,39 @@ export default function Read() {
               <Ionicons name="chevron-back" size={24} color={c.ink} />
             </Pressable>
             <Text numberOfLines={1} style={{ flex: 1, color: c.ink, fontFamily: serif, fontSize: 17 }}>{book.title}</Text>
+            <Pressable accessibilityLabel={live?.favorite ? "Remove from favorites" : "Add to favorites"} accessibilityState={{ selected: !!live?.favorite }} onPress={() => setFavorite([book.id], !live?.favorite)} style={styles.icon}>
+              <Ionicons name={live?.favorite ? "heart" : "heart-outline"} size={21} color={live?.favorite ? c.accent : c.soft} />
+            </Pressable>
             <Pressable accessibilityLabel="Bookmark this page" accessibilityState={{ selected: isMarked }} onPress={() => toggleBookmark(book.id, page)} style={styles.icon}>
               <Ionicons name={isMarked ? "bookmark" : "bookmark-outline"} size={21} color={isMarked ? c.accent : c.soft} />
             </Pressable>
           </View>
-          <View style={[styles.bottom, bar, { paddingBottom: insets.bottom + 8 }]}>
-            <View style={styles.rowBetween}>
-              <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13 }}>Page {page} of {total}</Text>
-              <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13 }}>{Math.round(((page - 1) / Math.max(1, total - 1)) * 100)}%</Text>
+          <View style={[styles.bottom, bar, { paddingBottom: insets.bottom + (wide ? 2 : 8), paddingTop: wide ? 4 : 14 }]}>
+            <View style={wide ? styles.wideRow : undefined}>
+              <View style={[styles.rowBetween, wide && { gap: 10 }]}>
+                <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13 }}>Page {page} of {total}</Text>
+                {wide ? null : <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13 }}>{Math.round(((page - 1) / Math.max(1, total - 1)) * 100)}%</Text>}
+              </View>
+              {total > 1 ? (
+                <View style={wide ? { flex: 1 } : undefined}>
+                  <Slider label="Page" value={page} min={1} max={total} track={c.edge} fill={c.accent} onChange={setPage} onDone={(p) => call(`reader.goTo(${p})`)} />
+                </View>
+              ) : null}
             </View>
-            {total > 1 ? <Slider label="Page" value={page} min={1} max={total} track={c.edge} fill={c.accent} onChange={setPage} onDone={(p) => call(`reader.goTo(${p})`)} /> : null}
-            <View style={{ flexDirection: "row" }}>
-              <Pressable style={styles.barButton} onPress={() => setSheet("contents")}>
-                <Text style={{ color: c.ink, fontFamily: sansMedium, fontSize: 14 }}>Contents</Text>
-              </Pressable>
-              <Pressable style={styles.barButton} onPress={() => setSheet("settings")}>
-                <Text style={{ color: c.ink, fontFamily: sansMedium, fontSize: 14 }}>Page and text</Text>
-              </Pressable>
+            <View style={wide ? styles.wideRow : undefined}>
+              {book.kind === "pdf" && canFlow ? (
+                <View style={wide ? { flex: 1, marginTop: -8 } : undefined}>
+                  <Segments c={c} options={[["page", "Original"], ["text", "Reading mode"]] as const} value={layout} onPick={pickLayout} />
+                </View>
+              ) : null}
+              <View style={{ flexDirection: "row", flex: wide ? 1 : undefined }}>
+                <Pressable style={styles.barButton} onPress={() => setSheet("contents")}>
+                  <Text style={{ color: c.ink, fontFamily: sansMedium, fontSize: 14 }}>Contents</Text>
+                </Pressable>
+                <Pressable style={styles.barButton} onPress={() => setSheet("settings")}>
+                  <Text style={{ color: c.ink, fontFamily: sansMedium, fontSize: 14 }}>Page and text</Text>
+                </Pressable>
+              </View>
             </View>
           </View>
         </>
@@ -282,7 +307,7 @@ export default function Read() {
       {sheet === "settings" ? (
         <View style={[styles.sheet, bar, { paddingBottom: insets.bottom + 16, borderTopLeftRadius: sheetRadius, borderTopRightRadius: sheetRadius }]}>
           <View style={{ alignItems: "flex-end", marginRight: -12 }}>{closeBtn(() => setSheet("none"))}</View>
-          <ScrollView style={{ maxHeight: 560 }} showsVerticalScrollIndicator={false}>
+          <ScrollView style={{ maxHeight: Math.min(560, screenH * 0.72) }} showsVerticalScrollIndicator={false}>
             <Label c={c}>Page</Label>
             <View style={{ flexDirection: "row", marginTop: 6 }}>
               {THEMES.map(([k, label, color]) => (
@@ -312,22 +337,14 @@ export default function Read() {
                   onChange={setSpeed}
                   onDone={(v) => {
                     setSetting("flipMs", String(v));
-                    call(`reader.setSettings(${JSON.stringify({ speed: v })});reader.next()`);
+                    // shows the new speed, and comes back to your page
+                    call(`reader.setSettings(${JSON.stringify({ speed: v })});reader.next();setTimeout(()=>reader.prev(),${v + 200})`);
                   }}
                 />
               </>
             ) : null}
 
-            {book.kind === "pdf" ? (
-              <>
-                <Label c={c} top={8}>This PDF</Label>
-                {canFlow ? (
-                  <Segments c={c} options={[["text", "Reflowed text"], ["page", "Original pages"]] as const} value={layout} onPick={pickLayout} />
-                ) : (
-                  <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13, lineHeight: 19, marginTop: 6 }}>A scan with no text inside, so it stays as printed pages.</Text>
-                )}
-              </>
-            ) : null}
+            {book.kind === "pdf" && !canFlow ? <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13, lineHeight: 19, marginTop: 8 }}>A scan with no text inside, so it stays as printed pages.</Text> : null}
 
             {flow ? (
               <>
@@ -352,16 +369,22 @@ export default function Read() {
       ) : null}
 
       {sheet === "contents" ? (
-        <View style={[styles.sheet, bar, { paddingBottom: insets.bottom + 16, borderTopLeftRadius: sheetRadius, borderTopRightRadius: sheetRadius }]}>
-          <View style={styles.rowBetween}>
-            <Text style={{ color: c.ink, fontFamily: serif, fontSize: 26 }}>Contents</Text>
-            <View style={{ marginRight: -12 }}>{closeBtn(() => setSheet("none"))}</View>
+        <View style={[styles.index, { backgroundColor: c.bg, paddingTop: insets.top + 6, paddingBottom: insets.bottom }]}>
+          <View style={styles.indexHead}>
+            <View style={{ flex: 1 }}>
+              <Text numberOfLines={1} style={{ color: c.ink, fontFamily: serif, fontSize: 26 }}>Contents</Text>
+              <Text numberOfLines={1} style={{ color: c.soft, fontFamily: sans, fontSize: 13, marginTop: 2 }}>{book.title} · page {page} of {total}</Text>
+            </View>
+            {closeBtn(() => setSheet("none"))}
           </View>
-          <ScrollView style={{ maxHeight: 520 }}>
+          <View style={[styles.indexBar, { backgroundColor: c.edge }]}>
+            <View style={{ height: "100%", width: `${Math.round(((page - 1) / Math.max(1, total - 1)) * 100)}%`, backgroundColor: c.accent }} />
+          </View>
+          <ScrollView ref={contents as never} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 22, paddingBottom: 24 }}>
             {mark ? (
-              <View style={{ marginBottom: 12 }}>
+              <View style={{ marginTop: 14 }}>
                 <Label c={c}>Resume mark</Label>
-                <View style={[styles.row, { justifyContent: "space-between" }]}>
+                <View style={styles.row}>
                   <Pressable style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 10, minHeight: 44 }} onPress={() => { setSheet("none"); setChrome(false); call("reader.goToMark()"); }}>
                     <Ionicons name="flag" size={15} color={c.accent} />
                     <Text numberOfLines={2} style={{ flex: 1, color: c.ink, fontFamily: serif, fontSize: 16, lineHeight: 21 }}>“{mark.snippet || "Where you stopped"}”</Text>
@@ -373,7 +396,7 @@ export default function Read() {
               </View>
             ) : null}
             {marked.length ? (
-              <View style={{ marginBottom: 12 }}>
+              <View style={{ marginTop: 14 }}>
                 <Label c={c}>Bookmarks</Label>
                 {marked.map((p) => (
                   <Pressable key={p} style={styles.row} onPress={() => { setSheet("none"); setChrome(false); call(`reader.goTo(${p})`); }}>
@@ -383,14 +406,22 @@ export default function Read() {
                 ))}
               </View>
             ) : null}
-            {toc.length === 0 ? <Text style={{ color: c.soft, fontFamily: sans, fontSize: 14, lineHeight: 21 }}>This book doesn't list its chapters. The slider moves through it.</Text> : null}
+            {mark || marked.length ? <View style={{ marginTop: 14 }}><Label c={c}>Chapters</Label></View> : <View style={{ height: 8 }} />}
+            {toc.length === 0 ? <Text style={{ color: c.soft, fontFamily: sans, fontSize: 14, lineHeight: 21, marginTop: 8 }}>{tocBusy ? "Reading the book for its chapters…" : "This book doesn't list its chapters. The slider moves through it."}</Text> : null}
             {toc.map((x, i) => {
               const next = toc[i + 1]?.page ?? Number.POSITIVE_INFINITY;
               const here = page >= x.page && page < next;
+              const depth = Math.min(x.depth ?? 0, 3);
               return (
-                <Pressable key={`${x.page}${i}`} style={[styles.row, { justifyContent: "space-between" }]} onPress={() => { setSheet("none"); setChrome(false); call(`reader.goTo(${x.page})`); }}>
-                  <Text numberOfLines={2} style={{ flex: 1, color: here ? c.accent : c.ink, fontFamily: serif, fontSize: 17, lineHeight: 22 }}>{x.title}</Text>
-                  <Text style={{ color: c.soft, fontFamily: sans, fontSize: 13 }}>{x.page}</Text>
+                <Pressable
+                  key={`${x.page}${i}`}
+                  accessibilityState={{ selected: here }}
+                  onLayout={here ? (e) => contents.current?.scrollTo({ y: Math.max(0, e.nativeEvent.layout.y - 160), animated: false }) : undefined}
+                  style={[styles.indexRow, { paddingLeft: depth * 16 }]}
+                  onPress={() => { setSheet("none"); setChrome(false); call(`reader.goTo(${x.page})`); }}
+                >
+                  <Text numberOfLines={2} style={{ flex: 1, color: here ? c.accent : depth ? c.soft : c.ink, fontFamily: depth ? sans : serif, fontSize: depth ? 14 : 18, lineHeight: depth ? 20 : 24 }}>{x.title}</Text>
+                  <Text style={{ color: here ? c.accent : c.soft, fontFamily: sans, fontSize: 13 }}>{x.page}</Text>
                 </Pressable>
               );
             })}
@@ -423,10 +454,10 @@ export default function Read() {
               <Text style={{ color: word.marked ? c.accent : c.onAccent, fontFamily: sansMedium, fontSize: 15 }}>{word.marked ? "Remove resume mark" : "Resume here tomorrow"}</Text>
             </Pressable>
           ) : null}
-          <ScrollView style={{ maxHeight: 280 }}>
+          <ScrollView style={{ maxHeight: Math.min(280, screenH * 0.38) }}>
             {word.word && word.def === undefined && !word.failed ? <Text style={{ color: c.soft, fontFamily: sans }}>Looking it up…</Text> : null}
             {word.word && (word.def === null || word.failed) ? (
-              <Text style={{ color: c.soft, fontFamily: sans, lineHeight: 21 }}>{word.failed ? "The dictionary couldn't be opened." : "Not in the English dictionary."}</Text>
+              <Text style={{ color: c.soft, fontFamily: sans, lineHeight: 21 }}>{word.failed ? "The dictionary couldn't be opened." : "Not in this dictionary. It covers nouns, verbs, adjectives and adverbs in English."}</Text>
             ) : null}
             {word.def?.senses.map((s, i) => (
               <View key={`${s.pos}${i}`} style={{ marginBottom: 14 }}>
@@ -496,10 +527,15 @@ const styles = StyleSheet.create({
   top: { position: "absolute", top: 0, left: 0, right: 0, flexDirection: "row", alignItems: "center", paddingHorizontal: 6, paddingBottom: 8 },
   bottom: { position: "absolute", bottom: 0, left: 0, right: 0, paddingHorizontal: 20, paddingTop: 14 },
   rowBetween: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  wideRow: { flexDirection: "row", alignItems: "center", gap: 16 },
   barButton: { flex: 1, height: 44, alignItems: "center", justifyContent: "center" },
   sheet: { position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: 22, paddingTop: 8 },
   sizeBtn: { width: 54, height: 44, alignItems: "center", justifyContent: "center" },
   row: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 44, paddingVertical: 6 },
+  index: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0 },
+  indexHead: { flexDirection: "row", alignItems: "center", paddingLeft: 22, paddingRight: 10, paddingBottom: 10 },
+  indexBar: { height: 2, overflow: "hidden" },
+  indexRow: { flexDirection: "row", alignItems: "center", gap: 14, minHeight: 46, paddingVertical: 6 },
   markBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, height: 48, borderRadius: 24, borderWidth: 1.5, marginBottom: 14 },
   note: { position: "absolute", alignSelf: "center", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 18, maxWidth: "88%" },
   coach: { position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,.76)" },

@@ -20,6 +20,28 @@ export type CatalogBook = {
   size: number;
   ia?: string;
   rights: string;
+  subjects?: string[];
+};
+
+/** What each library calls a genre. */
+export const GENRES = [
+  ["all", "For you"], ["novels", "Novels"], ["philosophy", "Philosophy"], ["spirituality", "Spirituality"], ["psychology", "Psychology"],
+  ["money", "Money"], ["tech", "Tech"], ["science", "Science"], ["poetry", "Poetry"], ["history", "History"],
+] as const;
+export type Genre = (typeof GENRES)[number][0];
+
+const GENRE_QUERY: Record<Genre, { gutenberg: string; standard: string; archive: string }> = {
+  all: { gutenberg: "", standard: "", archive: "" },
+  novels: { gutenberg: "s.fiction", standard: "fiction", archive: "fiction" },
+  philosophy: { gutenberg: "s.philosophy", standard: "philosophy", archive: "philosophy" },
+  spirituality: { gutenberg: "s.hinduism", standard: "spirituality", archive: "hinduism OR vedanta OR spiritual" },
+  // "psychology" alone also finds every "psychological fiction": Moby Dick, Gatsby
+  psychology: { gutenberg: "s.psychology !s.fiction", standard: "psychology", archive: "psychology" },
+  money: { gutenberg: "s.finance !s.fiction", standard: "money", archive: "finance OR wealth OR economics" },
+  tech: { gutenberg: "s.computers", standard: "technology", archive: "computers OR \"computer science\" OR technology" },
+  science: { gutenberg: "s.science !s.fiction", standard: "science", archive: "science" },
+  poetry: { gutenberg: "s.poetry", standard: "poetry", archive: "poetry" },
+  history: { gutenberg: "s.history !s.fiction", standard: "history", archive: "history" },
 };
 
 const AGENT = { headers: { accept: "application/json, application/atom+xml" } };
@@ -53,36 +75,68 @@ export const nameOrder = (s: string) => {
   return m ? `${m[2]} ${m[1]}` : s.trim();
 };
 
-// ---- Project Gutenberg, through Gutendex
+// ---- Project Gutenberg: its own catalogue feed, ranked by downloads
 
-type GutenBook = { id: number; title: string; authors: { name: string }[]; summaries?: string[]; formats: Record<string, string>; copyright: boolean | null };
+const unescape = (t: string) => t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
 
-export const parseGutendex = (text: string): CatalogBook[] => {
-  const d = JSON.parse(text) as { results: GutenBook[] };
-  return d.results
-    .filter((b) => b.copyright === false)
-    .flatMap((b): CatalogBook[] => {
-      const epub = https(b.formats["application/epub+zip"]);
-      if (!epub) return [];
-      return [{
-        key: `pg${b.id}`,
-        source: "Project Gutenberg",
-        title: b.title,
-        author: b.authors.map((a) => nameOrder(a.name)).join(", "),
-        cover: https(b.formats["image/jpeg"]),
-        about: b.summaries?.[0] ?? "",
-        kind: "epub",
-        url: epub,
-        size: 0,
-        rights: "Public domain in the US; check local law elsewhere",
-      }];
+export const parseGutenberg = (text: string): CatalogBook[] => {
+  const out: CatalogBook[] = [];
+  for (const m of text.matchAll(/<entry>[\s\S]*?<\/entry>/g)) {
+    const e = m[0];
+    // the feed mixes in "Authors" and "Subjects" links: only books have a number
+    const id = /<id>[^<]*\/ebooks\/(\d+)\.opds<\/id>/.exec(e)?.[1];
+    const title = /<title>([^<]*)<\/title>/.exec(e)?.[1];
+    if (!id || !title) continue;
+    out.push({
+      key: `pg${id}`,
+      source: "Project Gutenberg",
+      title: unescape(title),
+      author: unescape(/<content[^>]*>([^<]*)<\/content>/.exec(e)?.[1] ?? ""),
+      cover: `https://www.gutenberg.org/cache/epub/${id}/pg${id}.cover.medium.jpg`,
+      about: "",
+      kind: "epub",
+      url: `https://www.gutenberg.org/ebooks/${id}.epub3.images`,
+      size: 0,
+      rights: "Public domain in the US; check local law elsewhere",
     });
+  }
+  return out;
 };
 
-export const gutenberg = async (query: string, lang: string) => {
-  const q = new URLSearchParams({ languages: lang, copyright: "false" });
-  if (query) q.set("search", query);
-  return parseGutendex(await get(`https://gutendex.com/books/?${q}`));
+export const gutenberg = async (query: string, lang: string, genre: Genre = "all") => {
+  const q = [query, GENRE_QUERY[genre].gutenberg, `l.${lang}`].filter(Boolean).join(" ");
+  return parseGutenberg(await get(`https://www.gutenberg.org/ebooks/search.opds/?${new URLSearchParams({ query: q, sort_order: "downloads" })}`));
+};
+
+/** A book's two editions: pictures can make it fifty times bigger. */
+export const parseGutenbergEditions = (text: string) => {
+  const edition = (re: RegExp) => {
+    const l = [...text.matchAll(/<link[^>]*>/g)].map((m) => m[0]).find((x) => x.includes("application/epub+zip") && re.test(x));
+    const url = l && /href="([^"]+)"/.exec(l)?.[1];
+    return url ? { url: https(url) as string, size: Number(/length="(\d+)"/.exec(l)?.[1] ?? 0) } : null;
+  };
+  return { pictures: edition(/\.epub3\.images/), plain: edition(/\.epub\.noimages/) };
+};
+
+/** The subjects a library files a book under: they say which genre it belongs to. */
+export const parseGutenbergSubjects = (text: string) => [...text.matchAll(/<category[^>]*term="([^"]+)"/g)].map((m) => unescape(m[1] as string));
+
+export const subjectsOf = async (id: string, title = ""): Promise<string[]> => {
+  if (id.startsWith("se-")) return parseStandardEbooks(await get(`https://standardebooks.org/feeds/atom/all?query=${encodeURIComponent(title)}`)).find((b) => b.key === id)?.subjects ?? [];
+  if (id.startsWith("pg")) return parseGutenbergSubjects(await get(`https://www.gutenberg.org/ebooks/${id.slice(2)}.opds`));
+  if (id.startsWith("ia-")) {
+    const d = JSON.parse(await get(`https://archive.org/metadata/${encodeURIComponent(id.slice(3))}/metadata/subject`)) as { result?: string | string[] };
+    return asList(d.result);
+  }
+  return [];
+};
+
+export const gutenbergEditions = async (id: string) => parseGutenbergEditions(await get(`https://www.gutenberg.org/ebooks/${id}.opds`));
+
+/** Gutendex has summaries, but often doesn't answer: a nice extra, never needed. */
+export const gutenbergSummary = async (id: string) => {
+  const d = JSON.parse(await get(`https://gutendex.com/books/${id}`, 6000)) as { summaries?: string[] };
+  return (d.summaries?.[0] ?? "").replace(/\s*\(This is an automatically generated summary\.\)\s*$/, "");
 };
 
 // ---- Standard Ebooks
@@ -92,7 +146,7 @@ const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 type AtomLink = { href: string; rel?: string; type?: string; title?: string; length?: string };
 type AtomEntry = {
   id: string; title: string | { "#text": string }; author: { name: string } | { name: string }[];
-  summary?: string | { "#text": string }; link: AtomLink | AtomLink[]; "media:thumbnail"?: { url: string };
+  category?: { term: string } | { term: string }[]; summary?: string | { "#text": string }; link: AtomLink | AtomLink[]; "media:thumbnail"?: { url: string };
 };
 
 const textOf = (v: string | { "#text": string } | undefined) => (typeof v === "object" ? v["#text"] : (v ?? ""));
@@ -115,12 +169,14 @@ export const parseStandardEbooks = (text: string): CatalogBook[] => {
       url,
       size: Number(link?.length ?? 0),
       rights: "Public domain in the US; check local law elsewhere",
+      subjects: [...asList(e.category).map((c) => c.term)],
     }];
   });
 };
 
-export const standardEbooks = async (query: string) => {
-  const url = query ? `https://standardebooks.org/feeds/atom/all?query=${encodeURIComponent(query)}` : "https://standardebooks.org/feeds/atom/new-releases";
+export const standardEbooks = async (query: string, genre: Genre = "all") => {
+  const q = [query, GENRE_QUERY[genre].standard].filter(Boolean).join(" ");
+  const url = q ? `https://standardebooks.org/feeds/atom/all?query=${encodeURIComponent(q)}` : "https://standardebooks.org/feeds/atom/new-releases";
   return parseStandardEbooks(await get(url));
 };
 
@@ -151,8 +207,9 @@ export const parseArchive = (text: string): CatalogBook[] => {
   }));
 };
 
-export const archive = async (query: string, lang: string) => {
+export const archive = async (query: string, lang: string, genre: Genre = "all") => {
   const parts = ["mediatype:texts", 'format:"Text PDF"', IA_COLLECTIONS, "NOT access-restricted-item:true", `language:${IA_LANG[lang] ?? "eng"}`];
+  if (GENRE_QUERY[genre].archive) parts.unshift(`subject:(${GENRE_QUERY[genre].archive})`);
   if (query) parts.unshift(`(title:(${query.replace(/[^\p{L}\p{N} ]/gu, " ")}) OR creator:(${query.replace(/[^\p{L}\p{N} ]/gu, " ")}))`);
   const q = new URLSearchParams({ q: parts.join(" AND "), rows: "20", output: "json" });
   for (const f of ["identifier", "title", "creator", "description"]) q.append("fl[]", f);
@@ -177,29 +234,47 @@ export type Shelf = { title: string; note: string; source: Source; books: Catalo
 
 /** The shelves Discover shows, in order, before any library has answered. */
 export const shelvesFor = (lang: string): Shelf[] => [
-  ...(lang === "en" ? [{ title: "Beautifully made", note: "Standard Ebooks: edited and typeset by volunteers", source: "Standard Ebooks" as const }] : []),
-  { title: "Most read", note: "Project Gutenberg: over 70,000 books, many languages", source: "Project Gutenberg" as const },
-  { title: "Original printed pages", note: "Internet Archive: public-domain scans as PDF", source: "Internet Archive" as const },
+  ...(lang === "en" ? [{ title: "Beautifully made", note: "Standard Ebooks", source: "Standard Ebooks" as const }] : []),
+  { title: "Most read", note: "Project Gutenberg", source: "Project Gutenberg" as const },
+  { title: "Original printed pages", note: "Internet Archive", source: "Internet Archive" as const },
 ].map((s) => ({ ...s, books: [], state: "loading" as const }));
 
-const ASK: Record<Source, (query: string, lang: string) => Promise<CatalogBook[]>> = {
+const ASK: Record<Source, (query: string, lang: string, genre: Genre) => Promise<CatalogBook[]>> = {
   // Standard Ebooks publishes in English only
-  "Standard Ebooks": (query) => standardEbooks(query),
+  "Standard Ebooks": (query, _lang, genre) => standardEbooks(query, genre),
   "Project Gutenberg": gutenberg,
   "Internet Archive": archive,
 };
 
 /** Asks every library at once; each shelf fills in as its library answers, and one being slow or down never holds up the others. */
-export const browse = (query: string, lang: string, onShelf: (s: Shelf) => void): Promise<void> =>
+export const browse = (query: string, lang: string, onShelf: (s: Shelf) => void, genre: Genre = "all"): Promise<void> =>
   Promise.all(
     shelvesFor(lang).map(async (shelf) => {
       try {
-        const books = await ASK[shelf.source](query, lang);
-        log.info("discover", "shelf", { source: shelf.source, query, lang, books: books.length });
+        const books = await ASK[shelf.source](query, lang, genre);
+        log.info("discover", "shelf", { source: shelf.source, query, lang, genre, books: books.length });
         onShelf({ ...shelf, books, state: "ready" });
       } catch (e) {
-        log.warn("discover", "shelf failed", { source: shelf.source, query, lang, why: e instanceof Error ? e.message : String(e) });
+        log.warn("discover", "shelf failed", { source: shelf.source, query, lang, genre, why: e instanceof Error ? e.message : String(e) });
         onShelf({ ...shelf, state: "failed" });
       }
     }),
   ).then(() => undefined);
+
+/** One list from every shelf: turn about, no book twice. */
+export const mergeShelves = (shelves: Shelf[]): CatalogBook[] => {
+  const seen = new Set<string>();
+  const out: CatalogBook[] = [];
+  const longest = Math.max(0, ...shelves.map((s) => s.books.length));
+  for (let i = 0; i < longest; i++) {
+    for (const s of shelves) {
+      const b = s.books[i];
+      if (!b) continue;
+      const k = b.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(" ").slice(0, 5).join(" ");
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(b);
+    }
+  }
+  return out;
+};

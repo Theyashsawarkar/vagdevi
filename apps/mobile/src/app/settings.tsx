@@ -50,7 +50,7 @@ export default function Settings() {
         <Pressable
           style={{ minHeight: 44, justifyContent: "center" }}
           onPress={() =>
-            Alert.alert("Remove all downloads?", "Library books stay listed and download again when you open them. Files you opened yourself are removed.", [
+            Alert.alert("Remove every book?", "Every book leaves this phone, with your places and marks. You can find library books again in Discover.", [
               { text: "Cancel" },
               {
                 text: "Remove",
@@ -64,7 +64,7 @@ export default function Settings() {
             ])
           }
         >
-          <Text style={{ color: t.danger, fontFamily: sansMedium, fontSize: 14 }}>Remove all downloads</Text>
+          <Text style={{ color: t.danger, fontFamily: sansMedium, fontSize: 14 }}>Remove every book</Text>
         </Pressable>
       </Section>
 

@@ -41,6 +41,8 @@ body.eink .shade, body.black .shade { display: none; }
 .flow figcaption { font-size: .85em; color: var(--soft); text-align: center; margin-top: .4em; }
 .flow img { max-width: 100%; height: auto; max-height: var(--pageh); display: block; margin: .4em auto; break-inside: avoid; }
 body.night .flow img { opacity: .9; }
+/* a scanned page follows the page colour, as original pages do */
+.flow figure.scan img { filter: var(--filter); opacity: 1; }
 body.eink .flow img { filter: grayscale(1); }
 .flow blockquote { margin: .8em 0 .8em 1.2em; }
 .flow ul, .flow ol { margin: .6em 0; padding-left: 1.4em; }

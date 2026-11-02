@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: 'unsafe-inline'; worker-src file: blob:; connect-src file: blob: data:; img-src file: data: blob:; style-src file: 'unsafe-inline'; font-src file: data:;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file: 'unsafe-inline' 'wasm-unsafe-eval'; worker-src file: blob:; connect-src file: blob: data:; img-src file: data: blob:; style-src file: 'unsafe-inline'; font-src file: data:;">
 <link rel="stylesheet" href="reader.css">
 </head>
 <body class="night">

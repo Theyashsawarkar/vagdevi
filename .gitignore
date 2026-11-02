@@ -11,3 +11,6 @@ apps/mobile/assets/dict/
 apps/mobile/assets/reader/fflate.js.txt
 apps/mobile/assets/reader/reflow.js.txt
 apps/mobile/assets/reader/*.woff2
+apps/mobile/dist/
+docs/assets/screenshots/.tmp
+apps/mobile/assets/reader/pdf/
