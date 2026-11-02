@@ -7,3 +7,7 @@ coverage/
 apps/mobile/android/
 apps/mobile/assets/reader/pdf*.txt
 apps/mobile/assets/reader/marked*.txt
+apps/mobile/assets/dict/
+apps/mobile/assets/reader/fflate.js.txt
+apps/mobile/assets/reader/reflow.js.txt
+apps/mobile/assets/reader/*.woff2

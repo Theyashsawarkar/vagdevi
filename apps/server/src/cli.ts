@@ -6,16 +6,16 @@ import { buildDictionary } from "./dictionary.js";
 import { scan } from "./library.js";
 import { makeServer } from "./server.js";
 
-const usage = `pustak: your laptop's books on your phone.
+const usage = `vagdevi: your laptop's books on your phone.
 
-  pustak serve             serve the shared folders (the background service runs this)
-  pustak pair              show a QR code for the phone app (one use, 10 minutes)
-  pustak devices           the paired phones
-  pustak revoke NAME|ID    unpair a phone
-  pustak list              what's being shared
-  pustak doctor            check it all works
+  vagdevi serve             serve the shared folders (the background service runs this)
+  vagdevi pair              show a QR code for the phone app (one use, 10 minutes)
+  vagdevi devices           the paired phones
+  vagdevi revoke NAME|ID    unpair a phone
+  vagdevi list              what's being shared
+  vagdevi doctor            check it all works
 
-Folders, port: ~/.config/pustak/config.toml  (folders = ["~/Books"])
+Folders, port: ~/.config/vagdevi/config.toml  (folders = ["~/Books"])
 `;
 
 export const main = async (args: string[]) => {
@@ -24,14 +24,14 @@ export const main = async (args: string[]) => {
     case "serve": {
       const server = makeServer({ folders: cfg.folders });
       server.listen(cfg.port, cfg.host, () => {
-        console.error(`pustak: serving ${cfg.folders.join(", ")} on ${cfg.host}:${cfg.port}`);
+        console.error(`vagdevi: serving ${cfg.folders.join(", ")} on ${cfg.host}:${cfg.port}`);
       });
       // the dictionary is ready before anyone asks
       setTimeout(() => {
         try {
           buildDictionary();
         } catch (e) {
-          console.error("pustak: dictionary:", e);
+          console.error("vagdevi: dictionary:", e);
         }
       }, 100);
       break;
@@ -43,9 +43,9 @@ export const main = async (args: string[]) => {
         process.exit(1);
       }
       const code = newPairingCode();
-      const link = `pustak://pair?code=${code}&name=${encodeURIComponent(hostname())}&urls=${encodeURIComponent(urls.join(","))}`;
+      const link = `vagdevi://pair?code=${code}&name=${encodeURIComponent(hostname())}&urls=${encodeURIComponent(urls.join(","))}`;
       qrcode.generate(link, { small: true });
-      console.log(`Scan this in the pustak app (one use, for 10 minutes).\nReachable at: ${urls.join("  ")}`);
+      console.log(`Scan this in the vagdevi app (one use, for 10 minutes).\nReachable at: ${urls.join("  ")}`);
       if (!urls.some((u) => u.includes("//100."))) {
         console.log("Note: on a shared network the connection isn't encrypted. Tailscale makes it private from anywhere.");
       }

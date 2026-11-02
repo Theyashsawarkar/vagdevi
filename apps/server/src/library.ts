@@ -7,10 +7,11 @@ import { ensure, paths } from "./config.js";
 
 const run = promisify(execFile);
 
-export type Kind = "pdf" | "image" | "markdown";
+export type Kind = "pdf" | "epub" | "image" | "markdown";
 
 const KINDS: Record<string, Kind> = {
   ".pdf": "pdf",
+  ".epub": "epub",
   ".png": "image",
   ".jpg": "image",
   ".jpeg": "image",
@@ -22,6 +23,7 @@ const KINDS: Record<string, Kind> = {
 
 export const MIME: Record<string, string> = {
   ".pdf": "application/pdf",
+  ".epub": "application/epub+zip",
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",

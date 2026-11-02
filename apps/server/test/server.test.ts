@@ -9,8 +9,8 @@ import { baseForms, lookup, parseDataLine } from "../src/dictionary.js";
 import { idOf } from "../src/library.js";
 import { type AppRouter, makeServer } from "../src/server.js";
 
-const home = mkdtempSync(join(tmpdir(), "pustak-"));
-process.env.PUSTAK_HOME = join(home, "state");
+const home = mkdtempSync(join(tmpdir(), "vagdevi-"));
+process.env.VAGDEVI_HOME = join(home, "state");
 const books = join(home, "books");
 const secret = join(home, "secret");
 mkdirSync(join(books, "novels"), { recursive: true });

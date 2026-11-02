@@ -47,7 +47,7 @@ export const makeRouter = (opt: Options) => {
     pair: t.procedure.input(z.object({ code: z.string().max(100), name: z.string().max(60) })).mutation(({ input, ctx }) => {
       if (!allowAttempt(ctx.ip)) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many tries: wait a minute" });
       const got = claim(input.code, input.name);
-      if (!got) throw new TRPCError({ code: "FORBIDDEN", message: "That code is wrong or has expired: run pustak pair again" });
+      if (!got) throw new TRPCError({ code: "FORBIDDEN", message: "That code is wrong or has expired: run vagdevi pair again" });
       return got;
     }),
     library: authed.query(async () => {

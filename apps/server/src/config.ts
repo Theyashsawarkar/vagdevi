@@ -3,11 +3,11 @@ import { homedir, networkInterfaces } from "node:os";
 import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 
-/** Where pustak keeps things; PUSTAK_HOME puts it all in one place (tests). */
+/** Where vagdevi keeps things; VAGDEVI_HOME puts it all in one place (tests). */
 export const paths = () => {
-  const one = process.env.PUSTAK_HOME;
+  const one = process.env.VAGDEVI_HOME;
   const home = homedir();
-  const at = (env: string, def: string) => one ?? join(process.env[env] ?? join(home, def), "pustak");
+  const at = (env: string, def: string) => one ?? join(process.env[env] ?? join(home, def), "vagdevi");
   return {
     config: at("XDG_CONFIG_HOME", ".config"),
     state: at("XDG_STATE_HOME", ".local/state"),
