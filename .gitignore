@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.expo/
+*.log
+.env*
+coverage/
+apps/mobile/android/
+apps/mobile/assets/reader/pdf*.txt
+apps/mobile/assets/reader/marked*.txt
