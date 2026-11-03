@@ -15,6 +15,7 @@ import { classifyLibrary } from "../core/classify";
 import { startLogging } from "../core/log";
 import { prepareReader } from "../core/reader";
 import { useTheme } from "../ui/theme";
+import { ToastHost } from "../ui/toast";
 
 startLogging();
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
@@ -44,6 +45,7 @@ export default function Root() {
           <Stack.Screen name="book" options={{ animation: "slide_from_right" }} />
           <Stack.Screen name="settings" options={{ animation: "slide_from_right" }} />
         </Stack>
+        <ToastHost />
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

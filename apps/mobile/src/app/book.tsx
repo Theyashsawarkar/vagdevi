@@ -12,6 +12,7 @@ import { selectedBook, selectedGenre } from "../core/selected";
 import { useBus } from "../core/store";
 import { fileSize } from "../core/words";
 import { Cover } from "../ui/cover";
+import { toast } from "../ui/toast";
 import { sans, sansBold, sansMedium, serif, serifMedium, useTheme } from "../ui/theme";
 
 type Edition = { url: string; size: number };
@@ -89,6 +90,7 @@ export default function BookDetail() {
     queueBook(b.key);
     pumpDownloads();
     setWantRead(true);
+    toast({ title: "Saved to your Library", detail: "It downloads now, then reads without the internet", icon: "checkmark" });
   };
   const going = state === "queued" || state === "downloading";
   const paused = state === "paused";

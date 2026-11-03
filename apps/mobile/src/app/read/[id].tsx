@@ -12,6 +12,7 @@ import { log } from "../../core/log";
 import { define, type Definition } from "../../core/dict";
 import { prepareReader, readerDir } from "../../core/reader";
 import { useBus } from "../../core/store";
+import { toast } from "../../ui/toast";
 import { Slider } from "../../ui/slider";
 import { sans, sansMedium, serif } from "../../ui/theme";
 
@@ -222,6 +223,15 @@ export default function Read() {
   const marked = bookmarks(book.id);
   const live = getBook(book.id);
   const isMarked = marked.includes(page);
+  // the bottom bar is up while these are tapped: the toast sits above it
+  const loveBook = (on: boolean) => {
+    setFavorite([book.id], on);
+    toast(on ? { title: "Added to Favorites", detail: "It's at the top of your Library now", icon: "heart", above: 170 } : { title: "Removed from Favorites", icon: "heart-dislike-outline", above: 170 });
+  };
+  const markPage = () => {
+    toggleBookmark(book.id, page);
+    toast(isMarked ? { title: `Bookmark on page ${page} removed`, icon: "bookmark-outline", above: 170 } : { title: `Page ${page} bookmarked`, detail: "Jump back to it from Contents, under Bookmarks", icon: "bookmark", above: 170 });
+  };
   const bar = { backgroundColor: c.bar, borderColor: c.edge, borderWidth: c.flat ? StyleSheet.hairlineWidth : 0 };
   const closeBtn = (onPress: () => void) => (
     <Pressable accessibilityLabel="Close" onPress={onPress} style={styles.icon}>
@@ -266,10 +276,10 @@ export default function Read() {
               <Ionicons name="chevron-back" size={24} color={c.ink} />
             </Pressable>
             <Text numberOfLines={1} style={{ flex: 1, color: c.ink, fontFamily: serif, fontSize: 17 }}>{book.title}</Text>
-            <Pressable accessibilityLabel={live?.favorite ? "Remove from favorites" : "Add to favorites"} accessibilityState={{ selected: !!live?.favorite }} onPress={() => setFavorite([book.id], !live?.favorite)} style={styles.icon}>
+            <Pressable accessibilityLabel={live?.favorite ? "Remove from favorites" : "Add to favorites"} accessibilityState={{ selected: !!live?.favorite }} onPress={() => loveBook(!live?.favorite)} style={styles.icon}>
               <Ionicons name={live?.favorite ? "heart" : "heart-outline"} size={21} color={live?.favorite ? c.accent : c.soft} />
             </Pressable>
-            <Pressable accessibilityLabel="Bookmark this page" accessibilityState={{ selected: isMarked }} onPress={() => toggleBookmark(book.id, page)} style={styles.icon}>
+            <Pressable accessibilityLabel="Bookmark this page" accessibilityState={{ selected: isMarked }} onPress={markPage} style={styles.icon}>
               <Ionicons name={isMarked ? "bookmark" : "bookmark-outline"} size={21} color={isMarked ? c.accent : c.soft} />
             </Pressable>
           </View>

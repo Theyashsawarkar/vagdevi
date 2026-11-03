@@ -13,11 +13,15 @@ import { useBus } from "../core/store";
 import { percent } from "../core/words";
 import { Cover, coverOf } from "../ui/cover";
 import { BottomNav } from "../ui/nav";
+import { toast } from "../ui/toast";
 import { deva, SHLOKA, sans, sansMedium, serif, serifMedium, type Palette, useTheme } from "../ui/theme";
 
 const COLUMNS = 3;
 const SHELF_COVER = 104;
 const UNDO_MS = 6000;
+/** the shelf for books you added from this phone */
+const ME = "me";
+const nameOf = (key: string) => (key === ME ? "Me" : shelfName(key));
 
 export default function Library() {
   useBus(changed);
@@ -42,10 +46,10 @@ export default function Library() {
   const shelves = useMemo(() => {
     const by = new Map<string, Book[]>();
     for (const b of books) {
-      const k = SHELVES.some(([s]) => s === b.genre) ? b.genre : "other";
+      const k = b.source === "phone" ? ME : SHELVES.some(([s]) => s === b.genre) ? b.genre : "other";
       by.set(k, [...(by.get(k) ?? []), b]);
     }
-    return SHELVES.flatMap(([k]) => (by.has(k) ? [{ key: k as string, books: by.get(k) as Book[] }] : []));
+    return [ME, ...SHELVES.map(([k]) => k as string)].flatMap((k) => (by.has(k) ? [{ key: k, books: by.get(k) as Book[] }] : []));
   }, [books]);
   const favorites = books.filter((b) => b.favorite);
 
@@ -137,6 +141,14 @@ export default function Library() {
   const chosen = books.filter((b) => selected.has(b.id));
   const allLoved = chosen.length > 0 && chosen.every((b) => b.favorite);
 
+  const loveSelected = () => {
+    const n = selected.size;
+    setFavorite([...selected], !allLoved);
+    setSelected(new Set());
+    const what = n === 1 ? "Book" : `${n} books`;
+    toast(allLoved ? { title: `${what} removed from Favorites`, icon: "heart-dislike-outline" } : { title: `${what} added to Favorites`, detail: "Find them at the top of your Library", icon: "heart" });
+  };
+
   const tile = (b: Book, width: number) => (
     <Tile key={b.id} b={b} width={width} t={t} selecting={selecting} on={selected.has(b.id)} onPress={() => open(b)} onLongPress={() => toggle(b.id)} />
   );
@@ -205,7 +217,7 @@ export default function Library() {
               const on = tab === key;
               return (
                 <Pressable key={key} accessibilityState={{ selected: on }} onPress={() => setTab(key)} style={styles.genre}>
-                  <Text style={{ color: on ? t.ink : t.soft, fontFamily: on ? sansMedium : sans, fontSize: 15 }}>{key === "all" ? "All" : shelfName(key)}</Text>
+                  <Text style={{ color: on ? t.ink : t.soft, fontFamily: on ? sansMedium : sans, fontSize: 15 }}>{key === "all" ? "All" : nameOf(key)}</Text>
                   <View style={[styles.genreDot, { backgroundColor: on ? t.accent : "transparent" }]} />
                 </Pressable>
               );
@@ -220,8 +232,9 @@ export default function Library() {
         ) : (
           shelves.map((shelf) => (
             <View key={shelf.key} style={{ marginTop: 20 }}>
-              <Pressable onPress={() => setTab(shelf.key)} style={styles.shelfHead} accessibilityLabel={`${shelfName(shelf.key)}, ${shelf.books.length} books`}>
-                <Text style={[styles.shelfName, { color: t.ink }]}>{shelfName(shelf.key)}</Text>
+              <Pressable onPress={() => setTab(shelf.key)} style={styles.shelfHead} accessibilityLabel={`${nameOf(shelf.key)}, ${shelf.books.length} books`}>
+                {shelf.key === ME ? <Ionicons name="person" size={14} color={t.accent} style={{ marginRight: 7 }} /> : null}
+                <Text style={[styles.shelfName, { color: t.ink }]}>{nameOf(shelf.key)}</Text>
                 <Text style={{ color: t.faint, fontFamily: sans, fontSize: 13, marginLeft: 8 }}>{shelf.books.length}</Text>
               </Pressable>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.row}>
@@ -243,12 +256,14 @@ export default function Library() {
           <Pressable style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 8 }} onPress={() => setSelected(selected.size === books.length ? new Set() : new Set(books.map((b) => b.id)))}>
             <Text style={{ color: t.accent, fontFamily: sansMedium, fontSize: 14 }}>{selected.size === books.length ? "None" : "All"}</Text>
           </Pressable>
-          <Pressable accessibilityLabel={allLoved ? "Remove from favorites" : "Add to favorites"} style={styles.icon} onPress={() => { setFavorite([...selected], !allLoved); setSelected(new Set()); }}>
+          <Pressable accessibilityLabel={allLoved ? "Remove from favorites" : "Add to favorites"} style={styles.icon} onPress={loveSelected}>
             <Ionicons name={allLoved ? "heart" : "heart-outline"} size={22} color={t.accent} />
           </Pressable>
-          <Pressable accessibilityLabel="Change genre" style={styles.icon} onPress={() => setChoosingGenre(true)}>
-            <Ionicons name="pricetag-outline" size={21} color={t.ink} />
-          </Pressable>
+          {chosen.some((b) => b.source !== "phone") ? (
+            <Pressable accessibilityLabel="Change genre" style={styles.icon} onPress={() => setChoosingGenre(true)}>
+              <Ionicons name="pricetag-outline" size={21} color={t.ink} />
+            </Pressable>
+          ) : null}
           <Pressable accessibilityLabel={`Delete ${selected.size} selected`} style={styles.icon} onPress={removeSelected}>
             <Ionicons name="trash-outline" size={22} color={t.danger} />
           </Pressable>
