@@ -2,6 +2,15 @@
   <img alt="Vāgdevī" src="assets/logo.svg" width="120">
 </p>
 
+<!-- identity -->
+<p align="center">
+  <b>सरस्वति नमस्तुभ्यं वरदे कामरूपिणि ।<br>
+  विद्यारम्भं करिष्यामि सिद्धिर्भवतु मे सदा ॥</b><br>
+  <i>Salutations, Sarasvatī, giver of boons: I begin to learn, may it always bear fruit.</i><br>
+  <sub>Sarasvatī prayer, traditional</sub>
+</p>
+<!-- /identity -->
+
 <p align="center">
   <b>असतो मा सद्गमय । तमसो मा ज्योतिर्गमय ।</b><br>
   <i>From the unreal lead me to the real; from darkness lead me to light.</i><br>

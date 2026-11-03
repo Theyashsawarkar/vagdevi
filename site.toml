@@ -6,3 +6,6 @@ tagline = "A book reader for your phone: every free book in reach, pages that tu
 color = "peach"
 kind = "book reader for Android"
 logo = "assets/logo.svg"
+shloka = "सरस्वति नमस्तुभ्यं वरदे कामरूपिणि ।\nविद्यारम्भं करिष्यामि सिद्धिर्भवतु मे सदा ॥"
+shloka_meaning = "Salutations, Sarasvatī, giver of boons: I begin to learn, may it always bear fruit."
+shloka_source = "Sarasvatī prayer, traditional"
